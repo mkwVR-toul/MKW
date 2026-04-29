@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MK World Stats</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+body{margin:0;font-family:sans-serif;}
+header{background:#e53935;color:#fff;padding:15px;text-align:center;position:relative;}
+.reset-btn{position:absolute;right:8px;top:8px;background:#fff;color:#e53935;border:none;padding:4px 8px;font-size:12px;border-radius:6px;}
+
+.nav{display:flex;}
+.nav button{flex:1;padding:10px;border:none;background:#eee;}
+.nav button.active{background:#e53935;color:#fff;}
+
+.page{display:none;padding:15px;background:#f5f5f5;}
+.page.active{display:block;}
+
+.card{background:#fff;padding:15px;margin-bottom:15px;border-radius:12px;}
+button{width:100%;padding:8px;border:none;border-radius:10px;background:#e53935;color:#fff;margin-top:5px;}
+input,textarea{width:100%;padding:10px;margin-top:5px;}
+
+.suggest-box{background:#fff;border:1px solid #ccc;max-height:150px;overflow:auto;border-radius:8px;margin-top:5px;}
+.suggest-item{padding:8px;border-bottom:1px solid #eee;cursor:pointer;}
+.suggest-item:hover{background:#f5f5f5;}
+
+.delete-btn{background:#555;}
+.memo-img,.course-img{width:100%;border-radius:10px;margin-top:5px;cursor:pointer;}
+.memo-content{display:none;margin-top:10px;}
+
+.stats-row{display:flex;justify-content:space-around;margin-bottom:10px;font-weight:bold;}
+
+#imgModal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:#000a;justify-content:center;align-items:center;}
+#imgModal img{max-width:90%;max-height:90%;}
+</style>
+</head>
+
+<body>
+
+<header>
+MK World Stats
+<button class="reset-btn" onclick="resetStats()">戦績リセット</button>
+</header>
+
+<div class="nav">
+<button class="active" onclick="showPage(0,this)">メイン</button>
+<button onclick="showPage(1,this)">コース</button>
+<button onclick="showPage(2,this)">メモ</button>
+</div>
+
+<!-- メイン -->
+<div class="page active">
+
+<div class="card">
+<input id="courseSearch" placeholder="コース検索" oninput="showSuggestions()">
+<div id="suggestions" class="suggest-box"></div>
+
+<input id="newCourse" placeholder="コース追加">
+<button onclick="addCourse()">追加</button>
+</div>
+
+<div class="card">
+順位<input id="rank" type="number" min="1" max="24">
+VR<input id="vrInput" type="number" max="99999">
+<button onclick="addRecord()">記録</button>
+</div>
+
+<div class="card">
+<h3>直近5試合</h3>
+<div id="recent"></div>
+</div>
+
+<div class="card">
+<div class="stats-row" id="topStats"></div>
+<h3>VR推移</h3>
+<canvas id="chart"></canvas>
+</div>
+
+</div>
+
+<!-- コース -->
+<div class="page">
+<div class="card">
+<button onclick="cycleSort()" id="sortBtn">並び替え: 勝率 高い順</button>
+<div id="courseStats"></div>
+</div>
+</div>
+
+<!-- メモ -->
+<div class="page">
+<div class="card">
+
+<input id="memoSearch" placeholder="検索" oninput="render()">
+
+<input id="memoTitle" placeholder="タイトル">
+<textarea id="memoText"></textarea>
+<input type="file" id="memoImage">
+<button onclick="addMemo()">追加</button>
+
+<div id="memoList"></div>
+
+</div>
+</div>
+
+<div id="imgModal" onclick="this.style.display='none'">
+<img id="modalImg">
+</div>
+
+<script>
+
+// ===== IndexedDB =====
+let db;
+const req=indexedDB.open("MKDB",1);
+
+req.onupgradeneeded=e=>{
+ db=e.target.result;
+ db.createObjectStore("images");
+};
+
+req.onsuccess=e=>{
+ db=e.target.result;
+ render();
+};
+
+function saveImage(key,file){
+ return new Promise(res=>{
+  const tx=db.transaction("images","readwrite");
+  tx.objectStore("images").put(file,key);
+  tx.oncomplete=res;
+ });
+}
+
+function getImage(key){
+ return new Promise(res=>{
+  const tx=db.transaction("images","readonly");
+  const r=tx.objectStore("images").get(key);
+  r.onsuccess=()=>res(r.result?URL.createObjectURL(r.result):null);
+ });
+}
+
+// ===== データ =====
+let data=JSON.parse(localStorage.getItem("data")||"[]");
+let courses=JSON.parse(localStorage.getItem("courses")||'["マリオサーキット"]');
+let memos=JSON.parse(localStorage.getItem("memos")||"[]");
+
+let selectedCourse="";
+let sortMode=0;
+let chart;
+
+// ===== 保存 =====
+function save(){
+ localStorage.setItem("data",JSON.stringify(data));
+ localStorage.setItem("courses",JSON.stringify(courses));
+ localStorage.setItem("memos",JSON.stringify(memos));
+}
+
+// ===== ページ =====
+function showPage(i,btn){
+ document.querySelectorAll(".page").forEach((p,idx)=>p.classList.toggle("active",idx===i));
+ document.querySelectorAll(".nav button").forEach(b=>b.classList.remove("active"));
+ btn.classList.add("active");
+}
+
+// ===== 記録 =====
+function addRecord(){
+ if(!selectedCourse)return alert("コース選択");
+
+ let vr=Number(vrInput.value);
+ let r=Number(rank.value);
+
+ if(vr>99999)return alert("VR5桁以内");
+ if(r<1||r>24)return alert("順位1〜24");
+
+ let prev=data.length?data[data.length-1].vr:vr;
+ data.push({course:selectedCourse,rank:r,vr,diff:vr-prev});
+
+ vrInput.value="";rank.value="";courseSearch.value="";selectedCourse="";
+ save();render();
+}
+
+function deleteRecord(i){
+ if(!confirm("削除?"))return;
+ data.splice(i,1);
+ for(let x=0;x<data.length;x++){
+  let prev=x>0?data[x-1].vr:data[x].vr;
+  data[x].diff=data[x].vr-prev;
+ }
+ save();render();
+}
+
+// ===== コース =====
+function addCourse(){
+ let c=newCourse.value.trim();
+ if(!c)return;
+ if(!courses.includes(c))courses.push(c);
+ newCourse.value="";
+ save();render();
+}
+
+function deleteCourse(c){
+ if(!confirm("削除?"))return;
+ courses=courses.filter(x=>x!==c);
+ save();render();
+}
+
+// ===== 変換 =====
+function toKatakana(str){
+ return str.replace(/[\u3041-\u3096]/g,m=>String.fromCharCode(m.charCodeAt(0)+0x60));
+}
+
+// ===== コース検索（頭文字一致）=====
+function showSuggestions(){
+ let box=document.getElementById("suggestions");
+ let input=courseSearch.value.trim();
+
+ if(input===""){
+  box.innerHTML="";
+  return;
+ }
+
+ let key=toKatakana(input.toLowerCase());
+ box.innerHTML="";
+
+ courses
+ .filter(c=>toKatakana(c.toLowerCase()).startsWith(key))
+ .forEach(c=>{
+  let d=document.createElement("div");
+  d.className="suggest-item";
+  d.textContent=c;
+  d.onclick=()=>{
+   selectedCourse=c;
+   courseSearch.value=c;
+   box.innerHTML="";
+  };
+  box.appendChild(d);
+ });
+}
+
+// ===== 並び替え =====
+function cycleSort(){
+ sortMode=(sortMode+1)%4;
+ const t=["勝率 高い順","勝率 低い順","平均レート変動 大きい順","平均レート変動 小さい順"];
+ document.getElementById("sortBtn").textContent="並び替え: "+t[sortMode];
+ render();
+}
+
+// ===== メモ =====
+function addMemo(){
+ let t=memoTitle.value,txt=memoText.value,f=memoImage.files[0];
+ if(!t)return alert("タイトル必須");
+
+ if(f){
+  let key="memo_"+Date.now();
+  saveImage(key,f).then(()=>{
+   memos.push({title:t,text:txt,imgKey:key});
+   save();render();
+  });
+ }else{
+  memos.push({title:t,text:txt});
+  save();render();
+ }
+
+ memoTitle.value="";memoText.value="";memoImage.value="";
+}
+
+function editMemo(i){
+ let t=prompt("タイトル",memos[i].title);
+ if(t===null)return;
+ let txt=prompt("本文",memos[i].text||"");
+ if(txt===null)return;
+ memos[i].title=t;
+ memos[i].text=txt;
+ save();render();
+}
+
+function deleteMemo(i){
+ if(!confirm("削除?"))return;
+ memos.splice(i,1);
+ save();render();
+}
+
+function toggleMemo(i){
+ let el=document.getElementById("memo"+i);
+ el.style.display=el.style.display==="none"?"block":"none";
+}
+
+// ===== 画像 =====
+function uploadCourseImage(e,c){
+ let f=e.target.files[0];
+ if(!f)return;
+ saveImage("course_"+c,f).then(render);
+}
+
+// ===== 描画 =====
+async function render(){
+
+ // 直近5
+ recent.innerHTML="";
+ data.slice(-5).reverse().forEach((r,idx)=>{
+  let i=data.length-1-idx;
+  let color=r.diff>0?"red":"blue";
+
+  recent.innerHTML+=`
+  <div style="color:${color}">
+   ${r.course} ${r.rank}位 VR:${r.vr} (${r.diff>=0?"+":""}${r.diff})
+   <button class="delete-btn" onclick="deleteRecord(${i})">削除</button>
+  </div>`;
+ });
+
+ // 統計
+ let last30=data.slice(-30);
+ let win=last30.filter(d=>d.diff>0).length;
+ let wr=last30.length?(win/last30.length*100):0;
+
+ let maxVR=data.length?Math.max(...data.map(d=>d.vr)):0;
+ let avgRank=data.length?(data.reduce((a,b)=>a+b.rank,0)/data.length):0;
+
+ topStats.innerHTML=`
+ <div>最高VR:${maxVR}</div>
+ <div style="color:${wr>=50?"red":"blue"}">勝率:${wr.toFixed(1)}%</div>
+ <div>順位:${avgRank.toFixed(2)}位</div>
+ `;
+
+ // グラフ
+ if(chart)chart.destroy();
+ chart=new Chart(document.getElementById("chart"),{
+  type:'line',
+  data:{labels:data.map((_,i)=>i+1),datasets:[{data:data.map(d=>d.vr)}]}
+ });
+
+ // コース統計
+ let map={};
+ data.forEach(d=>{
+  if(!map[d.course])map[d.course]={c:0,t:0,w:0,df:0};
+  map[d.course].c++;
+  map[d.course].t+=d.rank;
+  map[d.course].df+=d.diff;
+  if(d.diff>0)map[d.course].w++;
+ });
+
+ let list=courses.map(c=>{
+  let s=map[c]||{c:0,t:0,w:0,df:0};
+  return {course:c,c:s.c,avgRank:s.c?(s.t/s.c):0,wr:s.c?(s.w/s.c*100):0,avgDiff:s.c?(s.df/s.c):0};
+ });
+
+ list.sort((a,b)=>{
+  if(sortMode===0)return b.wr-a.wr;
+  if(sortMode===1)return a.wr-b.wr;
+  if(sortMode===2)return b.avgDiff-a.avgDiff;
+  if(sortMode===3)return a.avgDiff-b.avgDiff;
+ });
+
+ let html="";
+ for(let i of list){
+  let img=await getImage("course_"+i.course);
+
+  html+=`
+  <div class="card">
+   <b>${i.course}</b><br>
+   回数:${i.c}<br>
+   平均順位:${i.c?i.avgRank.toFixed(2)+"位":"-"}<br>
+   平均レート変動:<span style="color:${i.avgDiff>0?"red":"blue"}">${i.c?i.avgDiff.toFixed(1):"-"}</span><br>
+   勝率:<span style="color:${i.wr>=50?"red":"blue"}">${i.c?i.wr.toFixed(1)+"%":"-"}</span><br>
+
+   <input type="file" onchange="uploadCourseImage(event,'${i.course}')">
+   ${img?`<img src="${img}" class="course-img" onclick="modalImg.src='${img}';imgModal.style.display='flex'">`:""}
+
+   <button onclick="deleteCourse('${i.course}')">削除</button>
+  </div>`;
+ }
+ courseStats.innerHTML=html;
+
+ // メモ
+ let mhtml="";
+ let search=toKatakana(memoSearch.value.toLowerCase());
+
+ for(let i=0;i<memos.length;i++){
+  let m=memos[i];
+  if(search && !toKatakana(m.title.toLowerCase()).startsWith(search))continue;
+
+  let img=m.imgKey?await getImage(m.imgKey):null;
+
+  mhtml+=`
+  <div class="card">
+   <div onclick="toggleMemo(${i})"><b>${m.title}</b></div>
+   <div id="memo${i}" class="memo-content">
+    ${m.text||""}
+    ${img?`<img src="${img}" class="memo-img" onclick="modalImg.src='${img}';imgModal.style.display='flex'">`:""}
+    <button onclick="editMemo(${i})">編集</button>
+    <button class="delete-btn" onclick="deleteMemo(${i})">削除</button>
+   </div>
+  </div>`;
+ }
+ memoList.innerHTML=mhtml;
+}
+
+render();
+</script>
+
+</body>
+</html>
